@@ -218,4 +218,12 @@ public interface JdbcOptions {
                     .mapType()
                     .noDefaultValue()
                     .withDescription("additional connection configuration parameters");
+
+    // ENABLE_DE_CYCLE
+
+    Option<Boolean> ENABLE_DE_CYCLE =
+            Options.key("enable_de_cycle")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Whether to enable de cycle, default is false.");
 }

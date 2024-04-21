@@ -28,6 +28,9 @@ import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDiale
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.BufferReducedBatchStatementExecutor;
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.BufferedBatchStatementExecutor;
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.CopyManagerBatchStatementExecutor;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.DeCycleBufferReducedBatchStatementExecutor;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.DeCycleInsertOrUpdateBatchStatementExecutor;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.DeCycleSimpleBatchStatementExecutor;
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.FieldNamedPreparedStatement;
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.InsertOrUpdateBatchStatementExecutor;
 import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.JdbcBatchStatementExecutor;
@@ -80,6 +83,18 @@ public class JdbcOutputFormatBuilder {
         } else if (primaryKeys == null || primaryKeys.isEmpty()) {
             statementExecutorFactory =
                     () -> createSimpleBufferedExecutor(dialect, database, table, tableSchema);
+        } else if (jdbcSinkConfig.isEnableDeCycle()) {
+            statementExecutorFactory =
+                    () ->
+                            createDeCycleUpsertBufferedExecutor(
+                                    dialect,
+                                    database,
+                                    table,
+                                    tableSchema,
+                                    primaryKeys.toArray(new String[0]),
+                                    jdbcSinkConfig.isEnableUpsert(),
+                                    jdbcSinkConfig.isPrimaryKeyUpdated(),
+                                    jdbcSinkConfig.isSupportUpsertByInsertOnly());
         } else {
             statementExecutorFactory =
                     () ->
@@ -156,6 +171,48 @@ public class JdbcOutputFormatBuilder {
                 upsertExecutor, deleteExecutor, keyExtractor, Function.identity());
     }
 
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleUpsertBufferedExecutor(
+            JdbcDialect dialect,
+            String database,
+            String table,
+            TableSchema tableSchema,
+            String[] pkNames,
+            boolean enableUpsert,
+            boolean isPrimaryKeyUpdated,
+            boolean supportUpsertByInsertOnly) {
+        int[] pkFields =
+                Arrays.stream(pkNames)
+                        .mapToInt(tableSchema.toPhysicalRowDataType()::indexOf)
+                        .toArray();
+
+        TableSchema pkSchema =
+                TableSchema.builder()
+                        .columns(
+                                Arrays.stream(pkFields)
+                                        .mapToObj(
+                                                (IntFunction<Column>) tableSchema.getColumns()::get)
+                                        .collect(Collectors.toList()))
+                        .build();
+
+        Function<SeaTunnelRow, SeaTunnelRow> keyExtractor = createKeyExtractor(pkFields);
+        JdbcBatchStatementExecutor<SeaTunnelRow> deleteExecutor =
+                createDeCycleDeleteExecutor(dialect, database, table, pkNames, pkSchema);
+        JdbcBatchStatementExecutor<SeaTunnelRow> upsertExecutor =
+                createDeCycleUpsertExecutor(
+                        dialect,
+                        database,
+                        table,
+                        tableSchema,
+                        pkNames,
+                        pkSchema,
+                        keyExtractor,
+                        enableUpsert,
+                        isPrimaryKeyUpdated,
+                        supportUpsertByInsertOnly);
+        return new DeCycleBufferReducedBatchStatementExecutor(
+                upsertExecutor, deleteExecutor, keyExtractor, Function.identity());
+    }
+
     private static JdbcBatchStatementExecutor<SeaTunnelRow> createUpsertExecutor(
             JdbcDialect dialect,
             String database,
@@ -192,6 +249,42 @@ public class JdbcOutputFormatBuilder {
                 dialect, database, table, tableSchema, pkNames, isPrimaryKeyUpdated);
     }
 
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleUpsertExecutor(
+            JdbcDialect dialect,
+            String database,
+            String table,
+            TableSchema tableSchema,
+            String[] pkNames,
+            TableSchema pkTableSchema,
+            Function<SeaTunnelRow, SeaTunnelRow> keyExtractor,
+            boolean enableUpsert,
+            boolean isPrimaryKeyUpdated,
+            boolean supportUpsertByInsertOnly) {
+        if (supportUpsertByInsertOnly) {
+            return createDeCycleInsertOnlyExecutor(dialect, database, table, tableSchema);
+        }
+        if (enableUpsert) {
+            Optional<String> upsertSQL =
+                    dialect.getUpsertStatement(
+                            database, table, tableSchema.getFieldNames(), pkNames);
+            if (upsertSQL.isPresent()) {
+                return createDeCycleSimpleExecutor(
+                        upsertSQL.get(), tableSchema, dialect.getRowConverter());
+            }
+            return createDeCycleInsertOrUpdateByQueryExecutor(
+                    dialect,
+                    database,
+                    table,
+                    tableSchema,
+                    pkNames,
+                    pkTableSchema,
+                    keyExtractor,
+                    isPrimaryKeyUpdated);
+        }
+        return createDeCycleInsertOrUpdateExecutor(
+                dialect, database, table, tableSchema, pkNames, isPrimaryKeyUpdated);
+    }
+
     private static JdbcBatchStatementExecutor<SeaTunnelRow> createCopyInBufferStatementExecutor(
             CopyManagerBatchStatementExecutor copyManagerBatchStatementExecutor) {
         return new BufferedBatchStatementExecutor(
@@ -222,6 +315,20 @@ public class JdbcOutputFormatBuilder {
                 dialect.getRowConverter());
     }
 
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleInsertOnlyExecutor(
+            JdbcDialect dialect, String database, String table, TableSchema tableSchema) {
+
+        return new DeCycleSimpleBatchStatementExecutor(
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getInsertIntoStatement(
+                                        database, table, tableSchema.getFieldNames()),
+                                tableSchema.getFieldNames()),
+                tableSchema,
+                dialect.getRowConverter());
+    }
+
     private static JdbcBatchStatementExecutor<SeaTunnelRow> createInsertOrUpdateExecutor(
             JdbcDialect dialect,
             String database,
@@ -231,6 +338,35 @@ public class JdbcOutputFormatBuilder {
             boolean isPrimaryKeyUpdated) {
 
         return new InsertOrUpdateBatchStatementExecutor(
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getInsertIntoStatement(
+                                        database, table, tableSchema.getFieldNames()),
+                                tableSchema.getFieldNames()),
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getUpdateStatement(
+                                        database,
+                                        table,
+                                        tableSchema.getFieldNames(),
+                                        pkNames,
+                                        isPrimaryKeyUpdated),
+                                tableSchema.getFieldNames()),
+                tableSchema,
+                dialect.getRowConverter());
+    }
+
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleInsertOrUpdateExecutor(
+            JdbcDialect dialect,
+            String database,
+            String table,
+            TableSchema tableSchema,
+            String[] pkNames,
+            boolean isPrimaryKeyUpdated) {
+
+        return new DeCycleInsertOrUpdateBatchStatementExecutor(
                 connection ->
                         FieldNamedPreparedStatement.prepareStatement(
                                 connection,
@@ -288,6 +424,44 @@ public class JdbcOutputFormatBuilder {
                 dialect.getRowConverter());
     }
 
+    private static JdbcBatchStatementExecutor<SeaTunnelRow>
+            createDeCycleInsertOrUpdateByQueryExecutor(
+                    JdbcDialect dialect,
+                    String database,
+                    String table,
+                    TableSchema tableSchema,
+                    String[] pkNames,
+                    TableSchema pkTableSchema,
+                    Function<SeaTunnelRow, SeaTunnelRow> keyExtractor,
+                    boolean isPrimaryKeyUpdated) {
+        return new DeCycleInsertOrUpdateBatchStatementExecutor(
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getRowExistsStatement(database, table, pkNames),
+                                pkNames),
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getInsertIntoStatement(
+                                        database, table, tableSchema.getFieldNames()),
+                                tableSchema.getFieldNames()),
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection,
+                                dialect.getUpdateStatement(
+                                        database,
+                                        table,
+                                        tableSchema.getFieldNames(),
+                                        pkNames,
+                                        isPrimaryKeyUpdated),
+                                tableSchema.getFieldNames()),
+                pkTableSchema,
+                keyExtractor,
+                tableSchema,
+                dialect.getRowConverter());
+    }
+
     private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeleteExecutor(
             JdbcDialect dialect,
             String database,
@@ -298,9 +472,29 @@ public class JdbcOutputFormatBuilder {
         return createSimpleExecutor(deleteSQL, pkTableSchema, dialect.getRowConverter());
     }
 
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleDeleteExecutor(
+            JdbcDialect dialect,
+            String database,
+            String table,
+            String[] pkNames,
+            TableSchema pkTableSchema) {
+        String deleteSQL = dialect.getDeleteStatement(database, table, pkNames);
+        return createDeCycleSimpleExecutor(deleteSQL, pkTableSchema, dialect.getRowConverter());
+    }
+
     private static JdbcBatchStatementExecutor<SeaTunnelRow> createSimpleExecutor(
             String sql, TableSchema tableSchema, JdbcRowConverter rowConverter) {
         return new SimpleBatchStatementExecutor(
+                connection ->
+                        FieldNamedPreparedStatement.prepareStatement(
+                                connection, sql, tableSchema.getFieldNames()),
+                tableSchema,
+                rowConverter);
+    }
+
+    private static JdbcBatchStatementExecutor<SeaTunnelRow> createDeCycleSimpleExecutor(
+            String sql, TableSchema tableSchema, JdbcRowConverter rowConverter) {
+        return new DeCycleSimpleBatchStatementExecutor(
                 connection ->
                         FieldNamedPreparedStatement.prepareStatement(
                                 connection, sql, tableSchema.getFieldNames()),

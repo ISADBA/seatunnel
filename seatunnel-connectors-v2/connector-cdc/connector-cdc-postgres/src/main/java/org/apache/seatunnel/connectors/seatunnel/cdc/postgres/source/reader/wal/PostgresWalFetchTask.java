@@ -22,6 +22,7 @@ import org.apache.seatunnel.connectors.cdc.base.source.split.IncrementalSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
 import org.apache.seatunnel.connectors.seatunnel.cdc.postgres.source.reader.PostgresSourceFetchTaskContext;
 
+import io.debezium.connector.postgresql.CustomPostgresStreamingChangeEventSource;
 import io.debezium.connector.postgresql.PostgresOffsetContext;
 import io.debezium.connector.postgresql.PostgresStreamingChangeEventSource;
 import io.debezium.connector.postgresql.connection.Lsn;
@@ -51,7 +52,7 @@ public class PostgresWalFetchTask implements FetchTask<SourceSplitBase> {
         taskRunning = true;
 
         streamingChangeEventSource =
-                new PostgresStreamingChangeEventSource(
+                new CustomPostgresStreamingChangeEventSource(
                         sourceFetchContext.getDbzConnectorConfig(),
                         sourceFetchContext.getSnapshotter(),
                         sourceFetchContext.getDataConnection(),

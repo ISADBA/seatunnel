@@ -194,6 +194,7 @@ public class IncrementalSourceRecordEmitter<T>
     }
 
     protected void emitElement(SourceRecord element, Collector<T> output) throws Exception {
+        // 接收增量数据的地方
         outputCollector.output = output;
         debeziumDeserializationSchema.deserialize(element, outputCollector);
     }
