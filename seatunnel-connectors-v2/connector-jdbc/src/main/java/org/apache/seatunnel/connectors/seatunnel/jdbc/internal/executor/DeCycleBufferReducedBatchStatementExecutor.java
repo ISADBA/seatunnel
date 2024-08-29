@@ -96,8 +96,10 @@ public class DeCycleBufferReducedBatchStatementExecutor
     }
 
     private void upsertDecycleFlagTable() throws SQLException {
+        // 生成一个1-1000的随机数
+        int randomNum = (int) (Math.random() * 1000) + 1;
         String decycleFlagSql =
-                "INSERT INTO __decycle_table VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET version = __decycle_table.version + 1;";
+                String.format("INSERT INTO __decycle_table VALUES (%d, 1) ON CONFLICT (id) DO UPDATE SET version = __decycle_table.version + 1;",randomNum);
         connection.prepareStatement(decycleFlagSql).execute();
     }
 }

@@ -18,6 +18,11 @@ sink端是通过jdbc进行写入目标PostgreSQL数据库。
 在这个场景下，需要对通过同步工具同步的数据进行标记，标记方法是在每条数据插入前，增加一个针对`__decycle_table`的操作。
 
 ## 配置方法
+1. 在要同步的源库和目标库创建标记表
+`create table __decycle_table(id bigint,version bigint,primary key(id));`
+
+
+2. 修改配置文件
 ```conf
 env {
   # You can set engine configuration here
