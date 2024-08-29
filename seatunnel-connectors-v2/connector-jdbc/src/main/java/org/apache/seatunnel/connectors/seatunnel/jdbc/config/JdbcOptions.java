@@ -220,7 +220,6 @@ public interface JdbcOptions {
                     .withDescription("additional connection configuration parameters");
 
     // ENABLE_DE_CYCLE
-
     Option<Boolean> ENABLE_DE_CYCLE =
             Options.key("enable_de_cycle")
                     .booleanType()

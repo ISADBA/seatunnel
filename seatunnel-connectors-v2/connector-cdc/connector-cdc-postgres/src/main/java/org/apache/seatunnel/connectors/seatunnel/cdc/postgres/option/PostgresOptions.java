@@ -47,4 +47,11 @@ public interface PostgresOptions {
                     .listType()
                     .noDefaultValue()
                     .withDescription("Schema name of the database to monitor.");
+
+    // ENABLE_DE_CYCLE
+    Option<Boolean> ENABLE_DE_CYCLE =
+            Options.key("enable_de_cycle")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Whether to enable de cycle, default is false.");
 }

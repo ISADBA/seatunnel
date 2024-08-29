@@ -30,10 +30,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * ClassName: CustomPostgresStreamingChangeEventSource Package: io.debezium.connector.postgresql
+ * ClassName: DeCyclePostgresStreamingChangeEventSource Package: io.debezium.connector.postgresql
  * Description: Author: fenghao Create 2024/8/18 16:45 Version 1.0
  */
-public class CustomPostgresStreamingChangeEventSource extends PostgresStreamingChangeEventSource
+public class DeCyclePostgresStreamingChangeEventSource extends PostgresStreamingChangeEventSource
         implements StreamingChangeEventSource<PostgresOffsetContext> {
 
     /**
@@ -72,7 +72,7 @@ public class CustomPostgresStreamingChangeEventSource extends PostgresStreamingC
 
     private Long skipTransactionId = 0L;
 
-    public CustomPostgresStreamingChangeEventSource(
+    public DeCyclePostgresStreamingChangeEventSource(
             PostgresConnectorConfig connectorConfig,
             Snapshotter snapshotter,
             PostgresConnection connection,

@@ -42,6 +42,7 @@ public class PostgresSourceConfigFactory extends JdbcSourceConfigFactory {
     private String slotName = PostgresOptions.SLOT_NAME.defaultValue();
 
     private List<String> schemaList;
+    private boolean enableDeCycle = false;
 
     @Override
     public JdbcSourceConfigFactory fromReadonlyConfig(ReadonlyConfig config) {
@@ -49,6 +50,7 @@ public class PostgresSourceConfigFactory extends JdbcSourceConfigFactory {
         this.decodingPluginName = config.get(PostgresOptions.DECODING_PLUGIN_NAME);
         this.slotName = config.get(PostgresOptions.SLOT_NAME);
         this.schemaList = config.get(PostgresOptions.SCHEMA_NAME);
+        this.enableDeCycle = config.get(PostgresOptions.ENABLE_DE_CYCLE);
         return this;
     }
 
@@ -78,6 +80,8 @@ public class PostgresSourceConfigFactory extends JdbcSourceConfigFactory {
 
         props.setProperty("database.tcpKeepAlive", String.valueOf(true));
         props.setProperty("include.schema.changes", String.valueOf(false));
+
+        props.setProperty("enable_de_cycle",String.valueOf(enableDeCycle));
 
         if (schemaList != null) {
             props.setProperty("schema.include.list", String.join(",", schemaList));
@@ -131,6 +135,7 @@ public class PostgresSourceConfigFactory extends JdbcSourceConfigFactory {
                 connectTimeoutMillis,
                 connectMaxRetries,
                 connectionPoolSize,
-                exactlyOnce);
+                exactlyOnce,
+                enableDeCycle);
     }
 }

@@ -30,6 +30,8 @@ import java.util.Properties;
 public class PostgresSourceConfig extends JdbcSourceConfig {
     private static final long serialVersionUID = 1L;
 
+    private  boolean  enableDeCycle;
+
     public PostgresSourceConfig(
             StartupConfig startupConfig,
             StopConfig stopConfig,
@@ -52,7 +54,8 @@ public class PostgresSourceConfig extends JdbcSourceConfig {
             long connectTimeoutMillis,
             int connectMaxRetries,
             int connectionPoolSize,
-            boolean exactlyOnce) {
+            boolean exactlyOnce,
+            boolean enableDeCycle) {
         super(
                 startupConfig,
                 stopConfig,
@@ -76,6 +79,7 @@ public class PostgresSourceConfig extends JdbcSourceConfig {
                 connectMaxRetries,
                 connectionPoolSize,
                 exactlyOnce);
+        this.enableDeCycle = enableDeCycle;
     }
 
     @Override
@@ -85,5 +89,9 @@ public class PostgresSourceConfig extends JdbcSourceConfig {
 
     public RelationalTableFilters getTableFilters() {
         return getDbzConnectorConfig().getTableFilters();
+    }
+
+    public boolean isEnableDeCycle() {
+        return enableDeCycle;
     }
 }
