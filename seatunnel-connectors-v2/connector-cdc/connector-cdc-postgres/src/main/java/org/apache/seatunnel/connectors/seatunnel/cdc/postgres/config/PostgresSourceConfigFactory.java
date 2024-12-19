@@ -81,7 +81,7 @@ public class PostgresSourceConfigFactory extends JdbcSourceConfigFactory {
         props.setProperty("database.tcpKeepAlive", String.valueOf(true));
         props.setProperty("include.schema.changes", String.valueOf(false));
 
-        props.setProperty("enable_de_cycle",String.valueOf(enableDeCycle));
+        props.setProperty("enable_de_cycle", String.valueOf(enableDeCycle));
 
         if (schemaList != null) {
             props.setProperty("schema.include.list", String.join(",", schemaList));

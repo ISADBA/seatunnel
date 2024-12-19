@@ -30,7 +30,7 @@ import java.util.Properties;
 public class PostgresSourceConfig extends JdbcSourceConfig {
     private static final long serialVersionUID = 1L;
 
-    private  boolean  enableDeCycle;
+    private boolean enableDeCycle;
 
     public PostgresSourceConfig(
             StartupConfig startupConfig,

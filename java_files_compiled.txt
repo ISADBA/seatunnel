@@ -1,0 +1,2636 @@
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcSinkFactory.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.configuration.ReadonlyConfig;
+import org.apache.seatunnel.api.configuration.util.OptionRule;
+import org.apache.seatunnel.api.sink.DataSaveMode;
+import org.apache.seatunnel.api.sink.SchemaSaveMode;
+import org.apache.seatunnel.api.table.catalog.CatalogOptions;
+import org.apache.seatunnel.api.table.catalog.CatalogTable;
+import org.apache.seatunnel.api.table.catalog.ConstraintKey;
+import org.apache.seatunnel.api.table.catalog.PrimaryKey;
+import org.apache.seatunnel.api.table.catalog.TableIdentifier;
+import org.apache.seatunnel.api.table.connector.TableSink;
+import org.apache.seatunnel.api.table.factory.Factory;
+import org.apache.seatunnel.api.table.factory.TableSinkFactory;
+import org.apache.seatunnel.api.table.factory.TableSinkFactoryContext;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.catalog.JdbcCatalogOptions;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDialect;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDialectLoader;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.dialectenum.FieldIdeEnum;
+
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import com.google.auto.service.AutoService;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static org.apache.seatunnel.api.sink.SinkCommonOptions.MULTI_TABLE_SINK_REPLICA;
+import static org.apache.seatunnel.api.sink.SinkReplaceNameConstant.REPLACE_DATABASE_NAME_KEY;
+import static org.apache.seatunnel.api.sink.SinkReplaceNameConstant.REPLACE_SCHEMA_NAME_KEY;
+import static org.apache.seatunnel.api.sink.SinkReplaceNameConstant.REPLACE_TABLE_NAME_KEY;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.AUTO_COMMIT;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.BATCH_SIZE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.COMPATIBLE_MODE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.CONNECTION_CHECK_TIMEOUT_SEC;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.CUSTOM_SQL;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.DATABASE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.DATA_SAVE_MODE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.DRIVER;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.GENERATE_SINK_SQL;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.IS_EXACTLY_ONCE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.MAX_COMMIT_ATTEMPTS;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.MAX_RETRIES;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.PASSWORD;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.PRIMARY_KEYS;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.QUERY;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.SCHEMA_SAVE_MODE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.SUPPORT_UPSERT_BY_QUERY_PRIMARY_KEY_EXIST;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.TABLE;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.TRANSACTION_TIMEOUT_SEC;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.URL;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.USER;
+import static org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions.XA_DATA_SOURCE_CLASS_NAME;
+
+@AutoService(Factory.class)
+public class JdbcSinkFactory implements TableSinkFactory {
+    @Override
+    public String factoryIdentifier() {
+        return "Jdbc";
+    }
+
+    private ReadonlyConfig getCatalogOptions(TableSinkFactoryContext context) {
+        ReadonlyConfig config = context.getOptions();
+        // TODO Remove obsolete code
+        Optional<Map<String, String>> catalogOptions =
+                config.getOptional(CatalogOptions.CATALOG_OPTIONS);
+        if (catalogOptions.isPresent()) {
+            return ReadonlyConfig.fromMap(new HashMap<>(catalogOptions.get()));
+        }
+        return config;
+    }
+
+    @Override
+    public TableSink createSink(TableSinkFactoryContext context) {
+        ReadonlyConfig config = context.getOptions();
+        CatalogTable catalogTable = context.getCatalogTable();
+        ReadonlyConfig catalogOptions = getCatalogOptions(context);
+        Optional<String> optionalTable = config.getOptional(TABLE);
+        Optional<String> optionalDatabase = config.getOptional(DATABASE);
+        if (!optionalTable.isPresent()) {
+            optionalTable = Optional.of(REPLACE_TABLE_NAME_KEY);
+        }
+        // get source table relevant information
+        TableIdentifier tableId = catalogTable.getTableId();
+        String sourceDatabaseName = tableId.getDatabaseName();
+        String sourceSchemaName = tableId.getSchemaName();
+        String sourceTableName = tableId.getTableName();
+        // get sink table relevant information
+        String sinkDatabaseName = optionalDatabase.orElse(REPLACE_DATABASE_NAME_KEY);
+        String sinkTableNameBefore = optionalTable.get();
+        String[] sinkTableSplitArray = sinkTableNameBefore.split("\\.");
+        String sinkTableName = sinkTableSplitArray[sinkTableSplitArray.length - 1];
+        String sinkSchemaName;
+        if (sinkTableSplitArray.length > 1) {
+            sinkSchemaName = sinkTableSplitArray[sinkTableSplitArray.length - 2];
+        } else {
+            sinkSchemaName = null;
+        }
+        if (StringUtils.isNotBlank(catalogOptions.get(JdbcCatalogOptions.SCHEMA))) {
+            sinkSchemaName = catalogOptions.get(JdbcCatalogOptions.SCHEMA);
+        }
+        // to add tablePrefix and tableSuffix
+        String tempTableName;
+        String prefix = catalogOptions.get(JdbcCatalogOptions.TABLE_PREFIX);
+        String suffix = catalogOptions.get(JdbcCatalogOptions.TABLE_SUFFIX);
+        if (StringUtils.isNotEmpty(prefix) || StringUtils.isNotEmpty(suffix)) {
+            tempTableName = StringUtils.isNotEmpty(prefix) ? prefix + sinkTableName : sinkTableName;
+            tempTableName = StringUtils.isNotEmpty(suffix) ? tempTableName + suffix : tempTableName;
+
+        } else {
+            tempTableName = sinkTableName;
+        }
+        // to replace
+        String finalDatabaseName = sinkDatabaseName;
+        if (StringUtils.isNotEmpty(sourceDatabaseName)) {
+            finalDatabaseName =
+                    sinkDatabaseName.replace(REPLACE_DATABASE_NAME_KEY, sourceDatabaseName);
+        }
+
+        String finalSchemaName;
+        if (sinkSchemaName != null) {
+            if (sourceSchemaName == null) {
+                finalSchemaName = sinkSchemaName;
+            } else {
+                finalSchemaName = sinkSchemaName.replace(REPLACE_SCHEMA_NAME_KEY, sourceSchemaName);
+            }
+        } else {
+            finalSchemaName = null;
+        }
+        String finalTableName = sinkTableName;
+        if (StringUtils.isNotEmpty(sourceTableName)) {
+            finalTableName = tempTableName.replace(REPLACE_TABLE_NAME_KEY, sourceTableName);
+        }
+
+        // rebuild TableIdentifier and catalogTable
+        TableIdentifier newTableId =
+                TableIdentifier.of(
+                        tableId.getCatalogName(),
+                        finalDatabaseName,
+                        finalSchemaName,
+                        finalTableName);
+        catalogTable =
+                CatalogTable.of(
+                        newTableId,
+                        catalogTable.getTableSchema(),
+                        catalogTable.getOptions(),
+                        catalogTable.getPartitionKeys(),
+                        catalogTable.getComment(),
+                        catalogTable.getCatalogName());
+        Map<String, String> map = config.toMap();
+        if (catalogTable.getTableId().getSchemaName() != null) {
+            map.put(
+                    TABLE.key(),
+                    catalogTable.getTableId().getSchemaName()
+                            + "."
+                            + catalogTable.getTableId().getTableName());
+        } else {
+            map.put(TABLE.key(), catalogTable.getTableId().getTableName());
+        }
+        map.put(DATABASE.key(), catalogTable.getTableId().getDatabaseName());
+        PrimaryKey primaryKey = catalogTable.getTableSchema().getPrimaryKey();
+        if (!config.getOptional(PRIMARY_KEYS).isPresent()) {
+            if (primaryKey != null && !CollectionUtils.isEmpty(primaryKey.getColumnNames())) {
+                map.put(PRIMARY_KEYS.key(), String.join(",", primaryKey.getColumnNames()));
+            } else {
+                Optional<ConstraintKey> keyOptional =
+                        catalogTable.getTableSchema().getConstraintKeys().stream()
+                                .filter(
+                                        key ->
+                                                ConstraintKey.ConstraintType.UNIQUE_KEY.equals(
+                                                        key.getConstraintType()))
+                                .findFirst();
+                if (keyOptional.isPresent()) {
+                    map.put(
+                            PRIMARY_KEYS.key(),
+                            keyOptional.get().getColumnNames().stream()
+                                    .map(key -> key.getColumnName())
+                                    .collect(Collectors.joining(",")));
+                }
+            }
+        }
+        config = ReadonlyConfig.fromMap(new HashMap<>(map));
+        // always execute
+        final ReadonlyConfig options = config;
+        JdbcSinkConfig sinkConfig = JdbcSinkConfig.of(config);
+        FieldIdeEnum fieldIdeEnum = config.get(JdbcOptions.FIELD_IDE);
+        catalogTable
+                .getOptions()
+                .put("fieldIde", fieldIdeEnum == null ? null : fieldIdeEnum.getValue());
+        JdbcDialect dialect =
+                JdbcDialectLoader.load(
+                        sinkConfig.getJdbcConnectionConfig().getUrl(),
+                        sinkConfig.getJdbcConnectionConfig().getCompatibleMode(),
+                        fieldIdeEnum == null ? null : fieldIdeEnum.getValue());
+        dialect.connectionUrlParse(
+                sinkConfig.getJdbcConnectionConfig().getUrl(),
+                sinkConfig.getJdbcConnectionConfig().getProperties(),
+                dialect.defaultParameter());
+        CatalogTable finalCatalogTable = catalogTable;
+        // get saveMode
+        DataSaveMode dataSaveMode = config.get(DATA_SAVE_MODE);
+        SchemaSaveMode schemaSaveMode = config.get(SCHEMA_SAVE_MODE);
+        return () ->
+                new JdbcSink(
+                        options,
+                        sinkConfig,
+                        dialect,
+                        schemaSaveMode,
+                        dataSaveMode,
+                        finalCatalogTable);
+    }
+
+    @Override
+    public OptionRule optionRule() {
+        return OptionRule.builder()
+                .required(URL, DRIVER, SCHEMA_SAVE_MODE, DATA_SAVE_MODE)
+                .optional(
+                        USER,
+                        PASSWORD,
+                        CONNECTION_CHECK_TIMEOUT_SEC,
+                        BATCH_SIZE,
+                        IS_EXACTLY_ONCE,
+                        GENERATE_SINK_SQL,
+                        AUTO_COMMIT,
+                        SUPPORT_UPSERT_BY_QUERY_PRIMARY_KEY_EXIST,
+                        PRIMARY_KEYS,
+                        COMPATIBLE_MODE,
+                        MULTI_TABLE_SINK_REPLICA)
+                .conditional(
+                        IS_EXACTLY_ONCE,
+                        true,
+                        XA_DATA_SOURCE_CLASS_NAME,
+                        MAX_COMMIT_ATTEMPTS,
+                        TRANSACTION_TIMEOUT_SEC)
+                .conditional(IS_EXACTLY_ONCE, false, MAX_RETRIES)
+                .conditional(GENERATE_SINK_SQL, true, DATABASE)
+                .conditional(GENERATE_SINK_SQL, false, QUERY)
+                .conditional(DATA_SAVE_MODE, DataSaveMode.CUSTOM_PROCESSING, CUSTOM_SQL)
+                .build();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcSinkWriter.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.commons.lang3.SerializationUtils;
+import org.apache.seatunnel.api.sink.MultiTableResourceManager;
+import org.apache.seatunnel.api.sink.SinkWriter;
+import org.apache.seatunnel.api.sink.SupportMultiTableSinkWriter;
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorErrorCode;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.JdbcOutputFormat;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.JdbcOutputFormatBuilder;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.connection.JdbcConnectionProvider;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.connection.SimpleJdbcConnectionPoolProviderProxy;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDialect;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.JdbcBatchStatementExecutor;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.JdbcSinkState;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.XidInfo;
+
+import com.zaxxer.hikari.HikariDataSource;
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+
+@Slf4j
+public class JdbcSinkWriter
+        implements SinkWriter<SeaTunnelRow, XidInfo, JdbcSinkState>,
+                SupportMultiTableSinkWriter<ConnectionPoolManager> {
+    private JdbcOutputFormat<SeaTunnelRow, JdbcBatchStatementExecutor<SeaTunnelRow>> outputFormat;
+    private final JdbcDialect dialect;
+    private final TableSchema tableSchema;
+    private JdbcConnectionProvider connectionProvider;
+    private transient boolean isOpen;
+    private final Integer primaryKeyIndex;
+    private final JdbcSinkConfig jdbcSinkConfig;
+
+    public JdbcSinkWriter(
+            JdbcDialect dialect,
+            JdbcSinkConfig jdbcSinkConfig,
+            TableSchema tableSchema,
+            Integer primaryKeyIndex) {
+        this.jdbcSinkConfig = jdbcSinkConfig;
+        this.dialect = dialect;
+        this.tableSchema = tableSchema;
+        this.primaryKeyIndex = primaryKeyIndex;
+        this.connectionProvider =
+                dialect.getJdbcConnectionProvider(jdbcSinkConfig.getJdbcConnectionConfig());
+        this.outputFormat =
+                new JdbcOutputFormatBuilder(
+                                dialect, connectionProvider, jdbcSinkConfig, tableSchema)
+                        .build();
+    }
+
+    @Override
+    public MultiTableResourceManager<ConnectionPoolManager> initMultiTableResourceManager(
+            int tableSize, int queueSize) {
+        HikariDataSource ds = new HikariDataSource();
+        ds.setIdleTimeout(30 * 1000);
+        ds.setMaximumPoolSize(queueSize);
+        ds.setJdbcUrl(jdbcSinkConfig.getJdbcConnectionConfig().getUrl());
+        if (jdbcSinkConfig.getJdbcConnectionConfig().getUsername().isPresent()) {
+            ds.setUsername(jdbcSinkConfig.getJdbcConnectionConfig().getUsername().get());
+        }
+        if (jdbcSinkConfig.getJdbcConnectionConfig().getPassword().isPresent()) {
+            ds.setPassword(jdbcSinkConfig.getJdbcConnectionConfig().getPassword().get());
+        }
+        ds.setAutoCommit(jdbcSinkConfig.getJdbcConnectionConfig().isAutoCommit());
+        return new JdbcMultiTableResourceManager(new ConnectionPoolManager(ds));
+    }
+
+    @Override
+    public void setMultiTableResourceManager(
+            MultiTableResourceManager<ConnectionPoolManager> multiTableResourceManager,
+            int queueIndex) {
+        connectionProvider.closeConnection();
+        this.connectionProvider =
+                new SimpleJdbcConnectionPoolProviderProxy(
+                        multiTableResourceManager.getSharedResource().get(),
+                        jdbcSinkConfig.getJdbcConnectionConfig(),
+                        queueIndex);
+        this.outputFormat =
+                new JdbcOutputFormatBuilder(
+                                dialect, connectionProvider, jdbcSinkConfig, tableSchema)
+                        .build();
+    }
+
+    @Override
+    public Optional<Integer> primaryKey() {
+        return primaryKeyIndex != null ? Optional.of(primaryKeyIndex) : Optional.empty();
+    }
+
+    private void tryOpen() throws IOException {
+        if (!isOpen) {
+            isOpen = true;
+            outputFormat.open();
+        }
+    }
+
+    @Override
+    public List<JdbcSinkState> snapshotState(long checkpointId) {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void write(SeaTunnelRow element) throws IOException {
+        tryOpen();
+        // 构建一个SeaTunnelRow对象，填充表名为t2,id和name字段的值为1，'abc'
+        SeaTunnelRow copy = SerializationUtils.clone(element);
+        copy.setTableId("t_dts.public.t2");
+        copy.setField(0, 1);
+        copy.setField(1, "abc");
+        outputFormat.writeRecord(element);
+        outputFormat.writeRecord(copy);
+        outputFormat.flush();
+    }
+
+    @Override
+    public Optional<XidInfo> prepareCommit() throws IOException {
+        tryOpen();
+        outputFormat.checkFlushException();
+        outputFormat.flush();
+        try {
+            if (!connectionProvider.getConnection().getAutoCommit()) {
+                connectionProvider.getConnection().commit();
+            }
+        } catch (SQLException e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.TRANSACTION_OPERATION_FAILED,
+                    "commit failed," + e.getMessage(),
+                    e);
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public void abortPrepare() {}
+
+    @Override
+    public void close() throws IOException {
+        tryOpen();
+        outputFormat.flush();
+        try {
+            if (!connectionProvider.getConnection().getAutoCommit()) {
+                connectionProvider.getConnection().commit();
+            }
+        } catch (SQLException e) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                    "unable to close JDBC sink write",
+                    e);
+        }
+        outputFormat.close();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcSinkAggregatedCommitter.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.GroupXaOperationResult;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaFacade;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOps;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOpsImpl;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.JdbcAggregatedCommitInfo;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.XidInfo;
+
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Slf4j
+public class JdbcSinkAggregatedCommitter
+        implements SinkAggregatedCommitter<XidInfo, JdbcAggregatedCommitInfo> {
+
+    private final XaFacade xaFacade;
+    private final XaGroupOps xaGroupOps;
+    private final JdbcSinkConfig jdbcSinkConfig;
+
+    public JdbcSinkAggregatedCommitter(JdbcSinkConfig jdbcSinkConfig) {
+        this.xaFacade =
+                XaFacade.fromJdbcConnectionOptions(jdbcSinkConfig.getJdbcConnectionConfig());
+        this.xaGroupOps = new XaGroupOpsImpl(xaFacade);
+        this.jdbcSinkConfig = jdbcSinkConfig;
+    }
+
+    private void tryOpen() throws IOException {
+        if (!xaFacade.isOpen()) {
+            try {
+                xaFacade.open();
+            } catch (Exception e) {
+                throw new JdbcConnectorException(
+                        CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                        "unable to open JDBC sink aggregated committer",
+                        e);
+            }
+        }
+    }
+
+    @Override
+    public List<JdbcAggregatedCommitInfo> commit(
+            List<JdbcAggregatedCommitInfo> aggregatedCommitInfos) throws IOException {
+        tryOpen();
+        return aggregatedCommitInfos.stream()
+                .map(
+                        aggregatedCommitInfo -> {
+                            log.info("commit xid: " + aggregatedCommitInfo.getXidInfoList());
+                            GroupXaOperationResult<XidInfo> result =
+                                    xaGroupOps.commit(
+                                            new ArrayList<>(aggregatedCommitInfo.getXidInfoList()),
+                                            false,
+                                            jdbcSinkConfig
+                                                    .getJdbcConnectionConfig()
+                                                    .getMaxCommitAttempts());
+                            return new JdbcAggregatedCommitInfo(result.getForRetry());
+                        })
+                .filter(ainfo -> !ainfo.getXidInfoList().isEmpty())
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public JdbcAggregatedCommitInfo combine(List<XidInfo> commitInfos) {
+        return new JdbcAggregatedCommitInfo(commitInfos);
+    }
+
+    @Override
+    public void abort(List<JdbcAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        tryOpen();
+        for (JdbcAggregatedCommitInfo commitInfos : aggregatedCommitInfo) {
+            xaGroupOps.rollback(commitInfos.getXidInfoList());
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        try {
+            if (xaFacade.isOpen()) {
+                xaFacade.close();
+            }
+        } catch (Exception e) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                    "unable to close JDBC sink aggregated committer",
+                    e);
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcExactlyOnceSinkWriter.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.common.JobContext;
+import org.apache.seatunnel.api.sink.SinkWriter;
+import org.apache.seatunnel.api.sink.SupportMultiTableSinkWriter;
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorErrorCode;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.JdbcOutputFormat;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.JdbcOutputFormatBuilder;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDialect;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor.JdbcBatchStatementExecutor;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaFacade;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOps;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOpsImpl;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XidGenerator;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.JdbcSinkState;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.XidInfo;
+
+import org.apache.commons.lang3.SerializationUtils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.common.base.Throwables;
+
+import javax.transaction.xa.Xid;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+
+import static org.apache.seatunnel.shade.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.seatunnel.shade.com.google.common.base.Preconditions.checkState;
+
+public class JdbcExactlyOnceSinkWriter
+        implements SinkWriter<SeaTunnelRow, XidInfo, JdbcSinkState>,
+                SupportMultiTableSinkWriter<Void> {
+    private static final Logger LOG = LoggerFactory.getLogger(JdbcExactlyOnceSinkWriter.class);
+
+    private final SinkWriter.Context sinkcontext;
+
+    private final JobContext context;
+
+    private final List<JdbcSinkState> recoverStates;
+
+    private final XaFacade xaFacade;
+
+    private final XaGroupOps xaGroupOps;
+
+    private final XidGenerator xidGenerator;
+
+    private final JdbcOutputFormat<SeaTunnelRow, JdbcBatchStatementExecutor<SeaTunnelRow>>
+            outputFormat;
+
+    private transient boolean isOpen;
+
+    private transient Xid currentXid;
+    private transient Xid prepareXid;
+
+    public JdbcExactlyOnceSinkWriter(
+            SinkWriter.Context sinkcontext,
+            JobContext context,
+            JdbcDialect dialect,
+            JdbcSinkConfig jdbcSinkConfig,
+            TableSchema tableSchema,
+            List<JdbcSinkState> states) {
+        checkArgument(
+                jdbcSinkConfig.getJdbcConnectionConfig().getMaxRetries() == 0,
+                "JDBC XA sink requires maxRetries equal to 0, otherwise it could "
+                        + "cause duplicates.");
+
+        this.context = context;
+        this.sinkcontext = sinkcontext;
+        this.recoverStates = states;
+        this.xidGenerator = XidGenerator.semanticXidGenerator();
+        checkState(jdbcSinkConfig.isExactlyOnce(), "is_exactly_once config error");
+        this.xaFacade =
+                XaFacade.fromJdbcConnectionOptions(jdbcSinkConfig.getJdbcConnectionConfig());
+        this.outputFormat =
+                new JdbcOutputFormatBuilder(dialect, xaFacade, jdbcSinkConfig, tableSchema).build();
+        this.xaGroupOps = new XaGroupOpsImpl(xaFacade);
+    }
+
+    private void tryOpen() {
+        if (!isOpen) {
+            isOpen = true;
+            try {
+                xidGenerator.open();
+                xaFacade.open();
+                outputFormat.open();
+                if (!recoverStates.isEmpty()) {
+                    Xid xid = recoverStates.get(0).getXid();
+                    // Rollback pending transactions that should not include recoverStates
+                    xaGroupOps.recoverAndRollback(context, sinkcontext, xidGenerator, xid);
+                }
+                beginTx();
+            } catch (Exception e) {
+                throw new JdbcConnectorException(
+                        CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                        "unable to open JDBC exactly one writer",
+                        e);
+            }
+        }
+    }
+
+    @Override
+    public List<JdbcSinkState> snapshotState(long checkpointId) {
+        checkState(prepareXid != null, "prepare xid must not be null");
+        return Collections.singletonList(new JdbcSinkState(prepareXid));
+    }
+
+    @Override
+    public void write(SeaTunnelRow element) {
+        tryOpen();
+        checkState(currentXid != null, "current xid must not be null");
+        SeaTunnelRow copy = SerializationUtils.clone(element);
+        outputFormat.writeRecord(copy);
+    }
+
+    @Override
+    public Optional<XidInfo> prepareCommit() throws IOException {
+        tryOpen();
+
+        boolean emptyXaTransaction = false;
+        try {
+            prepareCurrentTx();
+        } catch (Exception e) {
+            if (Throwables.getRootCause(e) instanceof XaFacade.EmptyXaTransactionException) {
+                emptyXaTransaction = true;
+                LOG.info("skip prepare empty xa transaction, xid={}", currentXid);
+            } else {
+                throw e;
+            }
+        }
+        this.currentXid = null;
+        beginTx();
+        checkState(prepareXid != null, "prepare xid must not be null");
+        return emptyXaTransaction ? Optional.empty() : Optional.of(new XidInfo(prepareXid, 0));
+    }
+
+    @Override
+    public void abortPrepare() {}
+
+    @Override
+    public void close() throws IOException {
+        if (currentXid != null && xaFacade.isOpen()) {
+            try {
+                LOG.debug("remove current transaction before closing, xid={}", currentXid);
+                xaFacade.failAndRollback(currentXid);
+            } catch (Exception e) {
+                LOG.warn("unable to fail/rollback current transaction, xid={}", currentXid, e);
+            }
+        }
+        try {
+            xaFacade.close();
+        } catch (Exception e) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                    "unable to close JDBC exactly one writer",
+                    e);
+        }
+        xidGenerator.close();
+        currentXid = null;
+        prepareXid = null;
+    }
+
+    private void beginTx() throws IOException {
+        checkState(currentXid == null, "currentXid not null");
+        currentXid = xidGenerator.generateXid(context, sinkcontext, System.currentTimeMillis());
+        try {
+            xaFacade.start(currentXid);
+        } catch (Exception e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.XA_OPERATION_FAILED,
+                    "unable to start xa transaction",
+                    e);
+        }
+    }
+
+    private void prepareCurrentTx() throws IOException {
+        checkState(currentXid != null, "no current xid");
+        outputFormat.flush();
+
+        Exception endAndPrepareException = null;
+        try {
+            xaFacade.endAndPrepare(currentXid);
+        } catch (Exception e) {
+            endAndPrepareException = e;
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.XA_OPERATION_FAILED,
+                    "unable to prepare current xa transaction",
+                    e);
+        } finally {
+            if (endAndPrepareException == null
+                    || Throwables.getRootCause(endAndPrepareException)
+                            instanceof XaFacade.EmptyXaTransactionException) {
+                prepareXid = currentXid;
+            }
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcSinkCommitter.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.sink.SinkCommitter;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcConnectionConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorErrorCode;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaFacade;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOps;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.xa.XaGroupOpsImpl;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.XidInfo;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+public class JdbcSinkCommitter implements SinkCommitter<XidInfo> {
+    private final XaFacade xaFacade;
+    private final XaGroupOps xaGroupOps;
+    private final JdbcConnectionConfig jdbcConnectionConfig;
+
+    public JdbcSinkCommitter(JdbcSinkConfig jdbcSinkConfig) throws IOException {
+        this.jdbcConnectionConfig = jdbcSinkConfig.getJdbcConnectionConfig();
+        this.xaFacade = XaFacade.fromJdbcConnectionOptions(jdbcConnectionConfig);
+        this.xaGroupOps = new XaGroupOpsImpl(xaFacade);
+        try {
+            xaFacade.open();
+        } catch (Exception e) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.WRITER_OPERATION_FAILED,
+                    "unable to open JDBC sink committer",
+                    e);
+        }
+    }
+
+    @Override
+    public List<XidInfo> commit(List<XidInfo> committables) {
+        return xaGroupOps
+                .commit(
+                        new ArrayList<>(committables),
+                        false,
+                        jdbcConnectionConfig.getMaxCommitAttempts())
+                .getForRetry();
+    }
+
+    @Override
+    public void abort(List<XidInfo> commitInfos) {
+        try {
+            xaGroupOps.rollback(commitInfos);
+        } catch (Exception e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.XA_OPERATION_FAILED, "rollback failed", e);
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//ConnectionPoolManager.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import com.zaxxer.hikari.HikariDataSource;
+import lombok.Getter;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Getter
+public class ConnectionPoolManager {
+
+    private final HikariDataSource connectionPool;
+
+    private final Map<Integer, Connection> connectionMap;
+
+    ConnectionPoolManager(HikariDataSource connectionPool) {
+        this.connectionPool = connectionPool;
+        connectionMap = new ConcurrentHashMap<>();
+    }
+
+    public Connection getConnection(int index) {
+        return connectionMap.computeIfAbsent(
+                index,
+                i -> {
+                    try {
+                        return connectionPool.getConnection();
+                    } catch (SQLException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+    }
+
+    public boolean containsConnection(int index) {
+        return connectionMap.containsKey(index);
+    }
+
+    public Connection remove(int index) {
+        return connectionMap.remove(index);
+    }
+
+    public String getPoolName() {
+        return connectionPool.getPoolName();
+    }
+
+    public void close() {
+        if (!connectionPool.isClosed()) {
+            connectionPool.close();
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcSink.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.common.JobContext;
+import org.apache.seatunnel.api.configuration.ReadonlyConfig;
+import org.apache.seatunnel.api.serialization.DefaultSerializer;
+import org.apache.seatunnel.api.serialization.Serializer;
+import org.apache.seatunnel.api.sink.DataSaveMode;
+import org.apache.seatunnel.api.sink.DefaultSaveModeHandler;
+import org.apache.seatunnel.api.sink.SaveModeHandler;
+import org.apache.seatunnel.api.sink.SchemaSaveMode;
+import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
+import org.apache.seatunnel.api.sink.SinkWriter;
+import org.apache.seatunnel.api.sink.SupportMultiTableSink;
+import org.apache.seatunnel.api.sink.SupportSaveMode;
+import org.apache.seatunnel.api.table.catalog.Catalog;
+import org.apache.seatunnel.api.table.catalog.CatalogTable;
+import org.apache.seatunnel.api.table.catalog.TablePath;
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.catalog.utils.CatalogUtils;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcOptions;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.config.JdbcSinkConfig;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.JdbcDialect;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.dialect.dialectenum.FieldIdeEnum;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.JdbcAggregatedCommitInfo;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.JdbcSinkState;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.state.XidInfo;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.utils.JdbcCatalogUtils;
+
+import org.apache.commons.lang3.StringUtils;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import static org.apache.seatunnel.api.common.SeaTunnelAPIErrorCode.HANDLE_SAVE_MODE_FAILED;
+
+public class JdbcSink
+        implements SeaTunnelSink<SeaTunnelRow, JdbcSinkState, XidInfo, JdbcAggregatedCommitInfo>,
+                SupportSaveMode,
+                SupportMultiTableSink {
+
+    private final TableSchema tableSchema;
+
+    private JobContext jobContext;
+
+    private final JdbcSinkConfig jdbcSinkConfig;
+
+    private final JdbcDialect dialect;
+
+    private final ReadonlyConfig config;
+
+    private final DataSaveMode dataSaveMode;
+
+    private final SchemaSaveMode schemaSaveMode;
+
+    private final CatalogTable catalogTable;
+
+    public JdbcSink(
+            ReadonlyConfig config,
+            JdbcSinkConfig jdbcSinkConfig,
+            JdbcDialect dialect,
+            SchemaSaveMode schemaSaveMode,
+            DataSaveMode dataSaveMode,
+            CatalogTable catalogTable) {
+        this.config = config;
+        this.jdbcSinkConfig = jdbcSinkConfig;
+        this.dialect = dialect;
+        this.schemaSaveMode = schemaSaveMode;
+        this.dataSaveMode = dataSaveMode;
+        this.catalogTable = catalogTable;
+        this.tableSchema = catalogTable.getTableSchema();
+    }
+
+    @Override
+    public String getPluginName() {
+        return "Jdbc";
+    }
+
+    @Override
+    public SinkWriter<SeaTunnelRow, XidInfo, JdbcSinkState> createWriter(
+            SinkWriter.Context context) {
+        SinkWriter<SeaTunnelRow, XidInfo, JdbcSinkState> sinkWriter;
+        if (jdbcSinkConfig.isExactlyOnce()) {
+            sinkWriter =
+                    new JdbcExactlyOnceSinkWriter(
+                            context,
+                            jobContext,
+                            dialect,
+                            jdbcSinkConfig,
+                            tableSchema,
+                            new ArrayList<>());
+        } else {
+            if (catalogTable != null && catalogTable.getTableSchema().getPrimaryKey() != null) {
+                String keyName = tableSchema.getPrimaryKey().getColumnNames().get(0);
+                int index = tableSchema.toPhysicalRowDataType().indexOf(keyName);
+                if (index > -1) {
+                    return new JdbcSinkWriter(dialect, jdbcSinkConfig, tableSchema, index);
+                }
+            }
+            sinkWriter = new JdbcSinkWriter(dialect, jdbcSinkConfig, tableSchema, null);
+        }
+        return sinkWriter;
+    }
+
+    @Override
+    public SinkWriter<SeaTunnelRow, XidInfo, JdbcSinkState> restoreWriter(
+            SinkWriter.Context context, List<JdbcSinkState> states) throws IOException {
+        if (jdbcSinkConfig.isExactlyOnce()) {
+            return new JdbcExactlyOnceSinkWriter(
+                    context, jobContext, dialect, jdbcSinkConfig, tableSchema, states);
+        }
+        return SeaTunnelSink.super.restoreWriter(context, states);
+    }
+
+    @Override
+    public Optional<SinkAggregatedCommitter<XidInfo, JdbcAggregatedCommitInfo>>
+            createAggregatedCommitter() {
+        if (jdbcSinkConfig.isExactlyOnce()) {
+            return Optional.of(new JdbcSinkAggregatedCommitter(jdbcSinkConfig));
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<Serializer<JdbcAggregatedCommitInfo>> getAggregatedCommitInfoSerializer() {
+        if (jdbcSinkConfig.isExactlyOnce()) {
+            return Optional.of(new DefaultSerializer<>());
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public void setJobContext(JobContext jobContext) {
+        this.jobContext = jobContext;
+    }
+
+    @Override
+    public Optional<Serializer<XidInfo>> getCommitInfoSerializer() {
+        if (jdbcSinkConfig.isExactlyOnce()) {
+            return Optional.of(new DefaultSerializer<>());
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<SaveModeHandler> getSaveModeHandler() {
+        if (catalogTable != null) {
+            if (StringUtils.isBlank(jdbcSinkConfig.getDatabase())) {
+                return Optional.empty();
+            }
+            if (StringUtils.isBlank(jdbcSinkConfig.getTable())) {
+                return Optional.empty();
+            }
+            // use query to write data can not support savemode
+            if (StringUtils.isNotBlank(jdbcSinkConfig.getSimpleSql())) {
+                return Optional.empty();
+            }
+            Optional<Catalog> catalogOptional =
+                    JdbcCatalogUtils.findCatalog(jdbcSinkConfig.getJdbcConnectionConfig(), dialect);
+            if (catalogOptional.isPresent()) {
+                try {
+                    Catalog catalog = catalogOptional.get();
+                    catalog.open();
+                    FieldIdeEnum fieldIdeEnumEnum = config.get(JdbcOptions.FIELD_IDE);
+                    String fieldIde =
+                            fieldIdeEnumEnum == null
+                                    ? FieldIdeEnum.ORIGINAL.getValue()
+                                    : fieldIdeEnumEnum.getValue();
+                    TablePath tablePath =
+                            TablePath.of(
+                                    catalogTable.getTableId().getDatabaseName(),
+                                    catalogTable.getTableId().getSchemaName(),
+                                    CatalogUtils.quoteTableIdentifier(
+                                            catalogTable.getTableId().getTableName(), fieldIde));
+                    catalogTable.getOptions().put("fieldIde", fieldIde);
+                    return Optional.of(
+                            new DefaultSaveModeHandler(
+                                    schemaSaveMode,
+                                    dataSaveMode,
+                                    catalog,
+                                    tablePath,
+                                    catalogTable,
+                                    config.get(JdbcOptions.CUSTOM_SQL)));
+                } catch (Exception e) {
+                    throw new JdbcConnectorException(HANDLE_SAVE_MODE_FAILED, e);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/sink//JdbcMultiTableResourceManager.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.sink;
+
+import org.apache.seatunnel.api.sink.MultiTableResourceManager;
+
+import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import java.util.Optional;
+
+@AllArgsConstructor
+@Slf4j
+public class JdbcMultiTableResourceManager
+        implements MultiTableResourceManager<ConnectionPoolManager> {
+
+    private ConnectionPoolManager connectionPoolManager;
+
+    @Override
+    public Optional<ConnectionPoolManager> getSharedResource() {
+        return Optional.of(connectionPoolManager);
+    }
+
+    @Override
+    public void close() {
+        log.info("start close connection pool" + connectionPoolManager.getPoolName());
+        connectionPoolManager.close();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//InsertOrUpdateBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.converter.JdbcRowConverter;
+
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.function.Function;
+
+@RequiredArgsConstructor
+public class InsertOrUpdateBatchStatementExecutor
+        implements JdbcBatchStatementExecutor<SeaTunnelRow> {
+    private final StatementFactory existStmtFactory;
+    @NonNull private final StatementFactory insertStmtFactory;
+    @NonNull private final StatementFactory updateStmtFactory;
+    private final TableSchema keyTableSchema;
+    private final Function<SeaTunnelRow, SeaTunnelRow> keyExtractor;
+    @NonNull private final TableSchema valueTableSchema;
+    @NonNull private final JdbcRowConverter rowConverter;
+    private transient PreparedStatement existStatement;
+    private transient PreparedStatement insertStatement;
+    private transient PreparedStatement updateStatement;
+    private transient Boolean preExistFlag;
+    private transient boolean submitted;
+
+    public InsertOrUpdateBatchStatementExecutor(
+            StatementFactory insertStmtFactory,
+            StatementFactory updateStmtFactory,
+            TableSchema valueTableSchema,
+            JdbcRowConverter rowConverter) {
+        this(
+                null,
+                insertStmtFactory,
+                updateStmtFactory,
+                null,
+                null,
+                valueTableSchema,
+                rowConverter);
+    }
+
+    @Override
+    public void prepareStatements(Connection connection) throws SQLException {
+        if (upsertMode()) {
+            existStatement = existStmtFactory.createStatement(connection);
+        }
+        insertStatement = insertStmtFactory.createStatement(connection);
+        updateStatement = updateStmtFactory.createStatement(connection);
+    }
+
+    @Override
+    public void addToBatch(SeaTunnelRow record) throws SQLException {
+        boolean exist = existRow(record);
+        if (exist) {
+            if (preExistFlag != null && !preExistFlag) {
+                insertStatement.executeBatch();
+                insertStatement.clearBatch();
+            }
+            rowConverter.toExternal(valueTableSchema, record, updateStatement);
+            updateStatement.addBatch();
+        } else {
+            if (preExistFlag != null && preExistFlag) {
+                updateStatement.executeBatch();
+                updateStatement.clearBatch();
+            }
+            rowConverter.toExternal(valueTableSchema, record, insertStatement);
+            insertStatement.addBatch();
+        }
+
+        preExistFlag = exist;
+        submitted = false;
+    }
+
+    @Override
+    public void executeBatch() throws SQLException {
+        if (preExistFlag != null) {
+            if (preExistFlag) {
+                updateStatement.executeBatch();
+                updateStatement.clearBatch();
+            } else {
+                insertStatement.executeBatch();
+                insertStatement.clearBatch();
+            }
+        }
+        submitted = true;
+    }
+
+    @Override
+    public void closeStatements() throws SQLException {
+        if (!submitted) {
+            executeBatch();
+        }
+        for (PreparedStatement statement :
+                Arrays.asList(existStatement, insertStatement, updateStatement)) {
+            if (statement != null) {
+                statement.close();
+            }
+        }
+    }
+
+    private boolean upsertMode() {
+        return existStmtFactory != null;
+    }
+
+    private boolean existRow(SeaTunnelRow record) throws SQLException {
+        if (upsertMode()) {
+            return exist(keyExtractor.apply(record));
+        }
+        switch (record.getRowKind()) {
+            case INSERT:
+                return false;
+            case UPDATE_AFTER:
+                return true;
+            default:
+                throw new JdbcConnectorException(
+                        CommonErrorCodeDeprecated.UNSUPPORTED_OPERATION,
+                        "unsupported row kind: " + record.getRowKind());
+        }
+    }
+
+    private boolean exist(SeaTunnelRow pk) throws SQLException {
+        rowConverter.toExternal(keyTableSchema, pk, existStatement);
+        try (ResultSet resultSet = existStatement.executeQuery()) {
+            return resultSet.next();
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//SimpleBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.converter.JdbcRowConverter;
+
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+@RequiredArgsConstructor
+public class SimpleBatchStatementExecutor implements JdbcBatchStatementExecutor<SeaTunnelRow> {
+    @NonNull private final StatementFactory statementFactory;
+    @NonNull private final TableSchema tableSchema;
+    @NonNull private final JdbcRowConverter converter;
+    private transient PreparedStatement statement;
+
+    @Override
+    public void prepareStatements(Connection connection) throws SQLException {
+        statement = statementFactory.createStatement(connection);
+    }
+
+    @Override
+    public void addToBatch(SeaTunnelRow record) throws SQLException {
+        converter.toExternal(tableSchema, record, statement);
+        statement.addBatch();
+    }
+
+    @Override
+    public void executeBatch() throws SQLException {
+        statement.executeBatch();
+        statement.clearBatch();
+    }
+
+    @Override
+    public void closeStatements() throws SQLException {
+        if (statement != null) {
+            statement.close();
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//CopyManagerBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.apache.seatunnel.api.table.catalog.TableSchema;
+import org.apache.seatunnel.api.table.type.SeaTunnelDataType;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorErrorCode;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.internal.connection.JdbcConnectionProvider;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
+
+import java.io.IOException;
+import java.io.StringReader;
+import java.lang.reflect.InvocationTargetException;
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.ArrayList;
+import java.util.List;
+
+public class CopyManagerBatchStatementExecutor implements JdbcBatchStatementExecutor<SeaTunnelRow> {
+
+    private final String copySql;
+    private final TableSchema tableSchema;
+    CopyManagerProxy copyManagerProxy;
+    CSVFormat csvFormat = CSVFormat.POSTGRESQL_CSV;
+    CSVPrinter csvPrinter;
+
+    public CopyManagerBatchStatementExecutor(String copySql, TableSchema tableSchema) {
+        this.copySql = copySql;
+        this.tableSchema = tableSchema;
+    }
+
+    public static void copyManagerProxyChecked(JdbcConnectionProvider connectionProvider) {
+        try (Connection connection = connectionProvider.getConnection()) {
+            new CopyManagerProxy(connection);
+        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.NO_SUPPORT_OPERATION_FAILED,
+                    "unable to open CopyManager Operation in this JDBC writer. Please configure option use_copy_statement = false.",
+                    e);
+        } catch (SQLException e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.CREATE_DRIVER_FAILED, "unable to open JDBC writer", e);
+        }
+    }
+
+    @Override
+    public void prepareStatements(Connection connection) throws SQLException {
+        try {
+            this.copyManagerProxy = new CopyManagerProxy(connection);
+            this.csvPrinter = new CSVPrinter(new StringBuilder(), csvFormat);
+        } catch (NoSuchMethodException
+                | IllegalAccessException
+                | InvocationTargetException
+                | IOException e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.NO_SUPPORT_OPERATION_FAILED,
+                    "unable to open CopyManager Operation in this JDBC writer. Please configure option use_copy_statement = false.",
+                    e);
+        } catch (SQLException e) {
+            throw new JdbcConnectorException(
+                    JdbcConnectorErrorCode.CREATE_DRIVER_FAILED, "unable to open JDBC writer", e);
+        }
+    }
+
+    @Override
+    public void addToBatch(SeaTunnelRow record) throws SQLException {
+        try {
+            this.csvPrinter.printRecord(toExtract(record));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private List<Object> toExtract(SeaTunnelRow record) {
+        SeaTunnelRowType rowType = tableSchema.toPhysicalRowDataType();
+        List<Object> csvRecord = new ArrayList<>();
+        for (int fieldIndex = 0; fieldIndex < rowType.getTotalFields(); fieldIndex++) {
+            SeaTunnelDataType<?> seaTunnelDataType = rowType.getFieldType(fieldIndex);
+            Object fieldValue = record.getField(fieldIndex);
+            if (fieldValue == null) {
+                csvRecord.add(null);
+                continue;
+            }
+            switch (seaTunnelDataType.getSqlType()) {
+                case STRING:
+                    csvRecord.add((String) record.getField(fieldIndex));
+                    break;
+                case BOOLEAN:
+                    csvRecord.add((Boolean) record.getField(fieldIndex));
+                    break;
+                case TINYINT:
+                    csvRecord.add((Byte) record.getField(fieldIndex));
+                    break;
+                case SMALLINT:
+                    csvRecord.add((Short) record.getField(fieldIndex));
+                    break;
+                case INT:
+                    csvRecord.add((Integer) record.getField(fieldIndex));
+                    break;
+                case BIGINT:
+                    csvRecord.add((Long) record.getField(fieldIndex));
+                    break;
+                case FLOAT:
+                    csvRecord.add((Float) record.getField(fieldIndex));
+                    break;
+                case DOUBLE:
+                    csvRecord.add((Double) record.getField(fieldIndex));
+                    break;
+                case DECIMAL:
+                    csvRecord.add((BigDecimal) record.getField(fieldIndex));
+                    break;
+                case DATE:
+                    LocalDate localDate = (LocalDate) record.getField(fieldIndex);
+                    csvRecord.add((java.sql.Date) java.sql.Date.valueOf(localDate));
+                    break;
+                case TIME:
+                    LocalTime localTime = (LocalTime) record.getField(fieldIndex);
+                    csvRecord.add((java.sql.Time) java.sql.Time.valueOf(localTime));
+                    break;
+                case TIMESTAMP:
+                    LocalDateTime localDateTime = (LocalDateTime) record.getField(fieldIndex);
+                    csvRecord.add((java.sql.Timestamp) java.sql.Timestamp.valueOf(localDateTime));
+                    break;
+                case BYTES:
+                    csvRecord.add(
+                            org.apache.commons.codec.binary.Base64.encodeBase64String(
+                                    (byte[]) record.getField(fieldIndex)));
+                    break;
+                case NULL:
+                    csvRecord.add(null);
+                    break;
+                case MAP:
+                case ARRAY:
+                case ROW:
+                default:
+                    throw new JdbcConnectorException(
+                            CommonErrorCodeDeprecated.UNSUPPORTED_DATA_TYPE,
+                            "Unexpected value: " + seaTunnelDataType);
+            }
+        }
+        return csvRecord;
+    }
+
+    @Override
+    public void executeBatch() throws SQLException {
+        try {
+            this.csvPrinter.flush();
+            this.copyManagerProxy.doCopy(
+                    copySql, new StringReader(this.csvPrinter.getOut().toString()));
+        } catch (InvocationTargetException | IllegalAccessException | IOException e) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.SQL_OPERATION_FAILED, "Sql command: " + copySql);
+        } finally {
+            try {
+                this.csvPrinter.close();
+                this.csvPrinter = new CSVPrinter(new StringBuilder(), csvFormat);
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    @Override
+    public void closeStatements() throws SQLException {
+        this.copyManagerProxy = null;
+        try {
+            this.csvPrinter.close();
+            this.csvPrinter = null;
+        } catch (Exception ignore) {
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//FieldNamedPreparedStatement.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.InputStream;
+import java.io.Reader;
+import java.math.BigDecimal;
+import java.net.URL;
+import java.sql.Array;
+import java.sql.Blob;
+import java.sql.Clob;
+import java.sql.Connection;
+import java.sql.Date;
+import java.sql.NClob;
+import java.sql.ParameterMetaData;
+import java.sql.PreparedStatement;
+import java.sql.Ref;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.RowId;
+import java.sql.SQLException;
+import java.sql.SQLWarning;
+import java.sql.SQLXML;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.apache.seatunnel.shade.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.seatunnel.shade.com.google.common.base.Preconditions.checkNotNull;
+
+@RequiredArgsConstructor
+@Slf4j
+public class FieldNamedPreparedStatement implements PreparedStatement {
+    private final PreparedStatement statement;
+    private final int[][] indexMapping;
+
+    @Override
+    public void setNull(int parameterIndex, int sqlType) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setNull(index, sqlType);
+        }
+    }
+
+    @Override
+    public void setBoolean(int parameterIndex, boolean x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setBoolean(index, x);
+        }
+    }
+
+    @Override
+    public void setByte(int parameterIndex, byte x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setByte(index, x);
+        }
+    }
+
+    @Override
+    public void setShort(int parameterIndex, short x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setShort(index, x);
+        }
+    }
+
+    @Override
+    public void setInt(int parameterIndex, int x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setInt(index, x);
+        }
+    }
+
+    @Override
+    public void setLong(int parameterIndex, long x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setLong(index, x);
+        }
+    }
+
+    @Override
+    public void setFloat(int parameterIndex, float x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setFloat(index, x);
+        }
+    }
+
+    @Override
+    public void setDouble(int parameterIndex, double x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setDouble(index, x);
+        }
+    }
+
+    @Override
+    public void setBigDecimal(int parameterIndex, BigDecimal x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setBigDecimal(index, x);
+        }
+    }
+
+    @Override
+    public void setString(int parameterIndex, String x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setString(index, x);
+        }
+    }
+
+    @Override
+    public void setBytes(int parameterIndex, byte[] x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setBytes(index, x);
+        }
+    }
+
+    @Override
+    public void setDate(int parameterIndex, Date x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setDate(index, x);
+        }
+    }
+
+    @Override
+    public void setTime(int parameterIndex, Time x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setTime(index, x);
+        }
+    }
+
+    @Override
+    public void setTimestamp(int parameterIndex, Timestamp x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setTimestamp(index, x);
+        }
+    }
+
+    @Override
+    public void setObject(int parameterIndex, Object x, int targetSqlType) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setObject(index, x, targetSqlType);
+        }
+    }
+
+    @Override
+    public void setObject(int parameterIndex, Object x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setObject(index, x);
+        }
+    }
+
+    @Override
+    public void setRef(int parameterIndex, Ref x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setRef(index, x);
+        }
+    }
+
+    @Override
+    public void setBlob(int parameterIndex, Blob x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setBlob(index, x);
+        }
+    }
+
+    @Override
+    public void setClob(int parameterIndex, Clob x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setClob(index, x);
+        }
+    }
+
+    @Override
+    public void setArray(int parameterIndex, Array x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setArray(index, x);
+        }
+    }
+
+    @Override
+    public void setDate(int parameterIndex, Date x, Calendar cal) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setDate(index, x, cal);
+        }
+    }
+
+    @Override
+    public void setTime(int parameterIndex, Time x, Calendar cal) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setTime(index, x, cal);
+        }
+    }
+
+    @Override
+    public void setTimestamp(int parameterIndex, Timestamp x, Calendar cal) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setTimestamp(index, x, cal);
+        }
+    }
+
+    @Override
+    public void setNull(int parameterIndex, int sqlType, String typeName) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setNull(index, sqlType, typeName);
+        }
+    }
+
+    @Override
+    public void setURL(int parameterIndex, URL x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setURL(index, x);
+        }
+    }
+
+    @Override
+    public void setRowId(int parameterIndex, RowId x) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setRowId(index, x);
+        }
+    }
+
+    @Override
+    public void setNString(int parameterIndex, String value) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setNString(index, value);
+        }
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, NClob value) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setNClob(index, value);
+        }
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, Reader reader, long length) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setSQLXML(int parameterIndex, SQLXML xmlObject) throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setSQLXML(index, xmlObject);
+        }
+    }
+
+    @Override
+    public void setObject(int parameterIndex, Object x, int targetSqlType, int scaleOrLength)
+            throws SQLException {
+        for (int index : indexMapping[parameterIndex - 1]) {
+            statement.setObject(index, x, targetSqlType, scaleOrLength);
+        }
+    }
+
+    @Override
+    public void setAsciiStream(int parameterIndex, InputStream x, int length) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setUnicodeStream(int parameterIndex, InputStream x, int length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setBinaryStream(int parameterIndex, InputStream x, int length) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setCharacterStream(int parameterIndex, Reader reader, int length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setNCharacterStream(int parameterIndex, Reader value, long length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setClob(int parameterIndex, Reader reader, long length) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setBlob(int parameterIndex, InputStream inputStream, long length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setAsciiStream(int parameterIndex, InputStream x, long length) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setBinaryStream(int parameterIndex, InputStream x, long length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setCharacterStream(int parameterIndex, Reader reader, long length)
+            throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setAsciiStream(int parameterIndex, InputStream x) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setBinaryStream(int parameterIndex, InputStream x) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setCharacterStream(int parameterIndex, Reader reader) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setNCharacterStream(int parameterIndex, Reader value) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setClob(int parameterIndex, Reader reader) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setBlob(int parameterIndex, InputStream inputStream) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, Reader reader) throws SQLException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean execute() throws SQLException {
+        return statement.execute();
+    }
+
+    @Override
+    public void addBatch() throws SQLException {
+        statement.addBatch();
+    }
+
+    @Override
+    public ResultSet executeQuery() throws SQLException {
+        return statement.executeQuery();
+    }
+
+    @Override
+    public int executeUpdate() throws SQLException {
+        return statement.executeUpdate();
+    }
+
+    @Override
+    public void clearParameters() throws SQLException {
+        statement.clearParameters();
+    }
+
+    @Override
+    public ResultSetMetaData getMetaData() throws SQLException {
+        return statement.getMetaData();
+    }
+
+    @Override
+    public ParameterMetaData getParameterMetaData() throws SQLException {
+        return statement.getParameterMetaData();
+    }
+
+    @Override
+    public ResultSet executeQuery(String sql) throws SQLException {
+        return statement.executeQuery(sql);
+    }
+
+    @Override
+    public int executeUpdate(String sql) throws SQLException {
+        return statement.executeUpdate(sql);
+    }
+
+    @Override
+    public void close() throws SQLException {
+        statement.close();
+    }
+
+    @Override
+    public int getMaxFieldSize() throws SQLException {
+        return statement.getMaxFieldSize();
+    }
+
+    @Override
+    public void setMaxFieldSize(int max) throws SQLException {
+        statement.setMaxFieldSize(max);
+    }
+
+    @Override
+    public int getMaxRows() throws SQLException {
+        return statement.getMaxRows();
+    }
+
+    @Override
+    public void setMaxRows(int max) throws SQLException {
+        statement.setMaxRows(max);
+    }
+
+    @Override
+    public void setEscapeProcessing(boolean enable) throws SQLException {
+        statement.setEscapeProcessing(enable);
+    }
+
+    @Override
+    public int getQueryTimeout() throws SQLException {
+        return statement.getQueryTimeout();
+    }
+
+    @Override
+    public void setQueryTimeout(int seconds) throws SQLException {
+        statement.setQueryTimeout(seconds);
+    }
+
+    @Override
+    public void cancel() throws SQLException {
+        statement.cancel();
+    }
+
+    @Override
+    public SQLWarning getWarnings() throws SQLException {
+        return statement.getWarnings();
+    }
+
+    @Override
+    public void clearWarnings() throws SQLException {
+        statement.clearWarnings();
+    }
+
+    @Override
+    public void setCursorName(String name) throws SQLException {
+        statement.setCursorName(name);
+    }
+
+    @Override
+    public boolean execute(String sql) throws SQLException {
+        return statement.execute(sql);
+    }
+
+    @Override
+    public ResultSet getResultSet() throws SQLException {
+        return statement.getResultSet();
+    }
+
+    @Override
+    public int getUpdateCount() throws SQLException {
+        return statement.getUpdateCount();
+    }
+
+    @Override
+    public boolean getMoreResults() throws SQLException {
+        return statement.getMoreResults();
+    }
+
+    @Override
+    public void setFetchDirection(int direction) throws SQLException {
+        statement.setFetchDirection(direction);
+    }
+
+    @Override
+    public int getFetchDirection() throws SQLException {
+        return statement.getFetchDirection();
+    }
+
+    @Override
+    public void setFetchSize(int rows) throws SQLException {
+        statement.setFetchSize(rows);
+    }
+
+    @Override
+    public int getFetchSize() throws SQLException {
+        return statement.getFetchSize();
+    }
+
+    @Override
+    public int getResultSetConcurrency() throws SQLException {
+        return statement.getResultSetConcurrency();
+    }
+
+    @Override
+    public int getResultSetType() throws SQLException {
+        return statement.getResultSetType();
+    }
+
+    @Override
+    public void addBatch(String sql) throws SQLException {
+        statement.addBatch(sql);
+    }
+
+    @Override
+    public void clearBatch() throws SQLException {
+        statement.clearBatch();
+    }
+
+    @Override
+    public int[] executeBatch() throws SQLException {
+        return statement.executeBatch();
+    }
+
+    @Override
+    public Connection getConnection() throws SQLException {
+        return statement.getConnection();
+    }
+
+    @Override
+    public boolean getMoreResults(int current) throws SQLException {
+        return statement.getMoreResults(current);
+    }
+
+    @Override
+    public ResultSet getGeneratedKeys() throws SQLException {
+        return statement.getGeneratedKeys();
+    }
+
+    @Override
+    public int executeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
+        return statement.executeUpdate(sql, autoGeneratedKeys);
+    }
+
+    @Override
+    public int executeUpdate(String sql, int[] columnIndexes) throws SQLException {
+        return statement.executeUpdate(sql, columnIndexes);
+    }
+
+    @Override
+    public int executeUpdate(String sql, String[] columnNames) throws SQLException {
+        return statement.executeUpdate(sql, columnNames);
+    }
+
+    @Override
+    public boolean execute(String sql, int autoGeneratedKeys) throws SQLException {
+        return statement.execute(sql, autoGeneratedKeys);
+    }
+
+    @Override
+    public boolean execute(String sql, int[] columnIndexes) throws SQLException {
+        return statement.execute(sql, columnIndexes);
+    }
+
+    @Override
+    public boolean execute(String sql, String[] columnNames) throws SQLException {
+        return statement.execute(sql, columnNames);
+    }
+
+    @Override
+    public int getResultSetHoldability() throws SQLException {
+        return statement.getResultSetHoldability();
+    }
+
+    @Override
+    public boolean isClosed() throws SQLException {
+        return statement.isClosed();
+    }
+
+    @Override
+    public void setPoolable(boolean poolable) throws SQLException {
+        statement.setPoolable(poolable);
+    }
+
+    @Override
+    public boolean isPoolable() throws SQLException {
+        return statement.isPoolable();
+    }
+
+    @Override
+    public void closeOnCompletion() throws SQLException {
+        statement.closeOnCompletion();
+    }
+
+    @Override
+    public boolean isCloseOnCompletion() throws SQLException {
+        return statement.isCloseOnCompletion();
+    }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) throws SQLException {
+        return statement.unwrap(iface);
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) throws SQLException {
+        return statement.isWrapperFor(iface);
+    }
+
+    public static FieldNamedPreparedStatement prepareStatement(
+            Connection connection, String sql, String[] fieldNames) throws SQLException {
+        checkNotNull(connection, "connection must not be null.");
+        checkNotNull(sql, "sql must not be null.");
+        checkNotNull(fieldNames, "fieldNames must not be null.");
+
+        int[][] indexMapping = new int[fieldNames.length][];
+        String parsedSQL;
+        if (sql.contains("?")) {
+            parsedSQL = sql;
+            for (int i = 0; i < fieldNames.length; i++) {
+                // SQL statement parameter index starts from 1
+                indexMapping[i] = new int[] {i + 1};
+            }
+        } else {
+            HashMap<String, List<Integer>> parameterMap = new HashMap<>();
+            parsedSQL = parseNamedStatement(sql, parameterMap);
+            // currently, the statements must contain all the field parameters
+            checkArgument(parameterMap.size() == fieldNames.length);
+            for (int i = 0; i < fieldNames.length; i++) {
+                String fieldName = fieldNames[i];
+                checkArgument(
+                        parameterMap.containsKey(fieldName),
+                        fieldName + " doesn't exist in the parameters of SQL statement: " + sql);
+                indexMapping[i] = parameterMap.get(fieldName).stream().mapToInt(v -> v).toArray();
+            }
+        }
+        log.info("PrepareStatement sql is:\n{}\n", parsedSQL);
+        return new FieldNamedPreparedStatement(
+                connection.prepareStatement(parsedSQL), indexMapping);
+    }
+
+    private static String parseNamedStatement(String sql, Map<String, List<Integer>> paramMap) {
+        StringBuilder parsedSql = new StringBuilder();
+        int fieldIndex = 1; // SQL statement parameter index starts from 1
+        int length = sql.length();
+        for (int i = 0; i < length; i++) {
+            char c = sql.charAt(i);
+            if (':' == c) {
+                int j = i + 1;
+                while (j < length && Character.isJavaIdentifierPart(sql.charAt(j))) {
+                    j++;
+                }
+                String parameterName = sql.substring(i + 1, j);
+                checkArgument(
+                        !parameterName.isEmpty(),
+                        "Named parameters in SQL statement must not be empty.");
+                paramMap.computeIfAbsent(parameterName, n -> new ArrayList<>()).add(fieldIndex);
+                fieldIndex++;
+                i = j - 1;
+                parsedSql.append('?');
+            } else {
+                parsedSql.append(c);
+            }
+        }
+        return parsedSql.toString();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//BufferReducedBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.apache.seatunnel.api.table.type.RowKind;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.common.exception.CommonErrorCodeDeprecated;
+import org.apache.seatunnel.connectors.seatunnel.jdbc.exception.JdbcConnectorException;
+
+import org.apache.commons.lang3.tuple.Pair;
+
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+
+@RequiredArgsConstructor
+public class BufferReducedBatchStatementExecutor
+        implements JdbcBatchStatementExecutor<SeaTunnelRow> {
+    @NonNull private final JdbcBatchStatementExecutor<SeaTunnelRow> upsertExecutor;
+    @NonNull private final JdbcBatchStatementExecutor<SeaTunnelRow> deleteExecutor;
+    @NonNull private final Function<SeaTunnelRow, SeaTunnelRow> keyExtractor;
+    @NonNull private final Function<SeaTunnelRow, SeaTunnelRow> valueTransform;
+
+    @NonNull private final LinkedHashMap<SeaTunnelRow, Pair<Boolean, SeaTunnelRow>> buffer =
+            new LinkedHashMap<>();
+
+    @Override
+    public void prepareStatements(Connection connection) throws SQLException {
+        upsertExecutor.prepareStatements(connection);
+        deleteExecutor.prepareStatements(connection);
+    }
+
+    @Override
+    public void addToBatch(SeaTunnelRow record) throws SQLException {
+        if (RowKind.UPDATE_BEFORE.equals(record.getRowKind())) {
+            // do nothing
+            return;
+        }
+
+        SeaTunnelRow key = keyExtractor.apply(record);
+        boolean changeFlag = changeFlag(record.getRowKind());
+        SeaTunnelRow value = valueTransform.apply(record);
+        buffer.put(key, Pair.of(changeFlag, value));
+    }
+
+    @Override
+    public void executeBatch() throws SQLException {
+        Boolean preChangeFlag = null;
+        Set<Map.Entry<SeaTunnelRow, Pair<Boolean, SeaTunnelRow>>> entrySet = buffer.entrySet();
+        for (Map.Entry<SeaTunnelRow, Pair<Boolean, SeaTunnelRow>> entry : entrySet) {
+            Boolean currentChangeFlag = entry.getValue().getKey();
+            if (currentChangeFlag) {
+                if (preChangeFlag != null && !preChangeFlag) {
+                    deleteExecutor.executeBatch();
+                }
+                upsertExecutor.addToBatch(entry.getValue().getValue());
+            } else {
+                if (preChangeFlag != null && preChangeFlag) {
+                    upsertExecutor.executeBatch();
+                }
+                deleteExecutor.addToBatch(entry.getKey());
+            }
+            preChangeFlag = currentChangeFlag;
+        }
+
+        if (preChangeFlag != null) {
+            if (preChangeFlag) {
+                upsertExecutor.executeBatch();
+            } else {
+                deleteExecutor.executeBatch();
+            }
+        }
+        buffer.clear();
+    }
+
+    @Override
+    public void closeStatements() throws SQLException {
+        if (!buffer.isEmpty()) {
+            executeBatch();
+        }
+        upsertExecutor.closeStatements();
+        deleteExecutor.closeStatements();
+    }
+
+    private boolean changeFlag(RowKind rowKind) {
+        switch (rowKind) {
+            case INSERT:
+            case UPDATE_AFTER:
+                return true;
+            case DELETE:
+            case UPDATE_BEFORE:
+                return false;
+            default:
+                throw new JdbcConnectorException(
+                        CommonErrorCodeDeprecated.UNSUPPORTED_OPERATION,
+                        "Unsupported rowKind: " + rowKind);
+        }
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//StatementFactory.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+@FunctionalInterface
+public interface StatementFactory {
+
+    PreparedStatement createStatement(Connection connection) throws SQLException;
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//BufferedBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+
+@RequiredArgsConstructor
+public class BufferedBatchStatementExecutor implements JdbcBatchStatementExecutor<SeaTunnelRow> {
+    @NonNull private final JdbcBatchStatementExecutor<SeaTunnelRow> statementExecutor;
+    @NonNull private final Function<SeaTunnelRow, SeaTunnelRow> valueTransform;
+    @NonNull private final List<SeaTunnelRow> buffer = new ArrayList<>();
+
+    @Override
+    public void prepareStatements(Connection connection) throws SQLException {
+        statementExecutor.prepareStatements(connection);
+    }
+
+    @Override
+    public void addToBatch(SeaTunnelRow record) throws SQLException {
+        buffer.add(valueTransform.apply(record));
+    }
+
+    @Override
+    public void executeBatch() throws SQLException {
+        if (!buffer.isEmpty()) {
+            for (SeaTunnelRow row : buffer) {
+                statementExecutor.addToBatch(row);
+            }
+            statementExecutor.executeBatch();
+            buffer.clear();
+        }
+    }
+
+    @Override
+    public void closeStatements() throws SQLException {
+        if (!buffer.isEmpty()) {
+            executeBatch();
+        }
+        statementExecutor.closeStatements();
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//CopyManagerProxy.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Reader;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.SQLException;
+
+class CopyManagerProxy {
+    private static final Logger LOG = LoggerFactory.getLogger(CopyManagerProxy.class);
+    Object connection;
+    Object copyManager;
+    Class<?> connectionClazz;
+    Class<?> copyManagerClazz;
+    Method getCopyAPIMethod;
+    Method copyInMethod;
+
+    CopyManagerProxy(Connection connection)
+            throws NoSuchMethodException, InvocationTargetException, IllegalAccessException,
+                    SQLException {
+        LOG.info("Proxy connection class: {}", connection.getClass().getName());
+        this.connection = connection.unwrap(Connection.class);
+        LOG.info("Proxy unwrap connection class: {}", this.connection.getClass().getName());
+        if (Proxy.isProxyClass(this.connection.getClass())) {
+            InvocationHandler handler = Proxy.getInvocationHandler(this.connection);
+            this.connection = getConnectionFromInvocationHandler(handler);
+            if (null == this.connection) {
+                throw new InvocationTargetException(
+                        new NullPointerException("Proxy Connection is null."));
+            }
+            LOG.info("Proxy connection class: {}", this.connection.getClass().getName());
+            this.connectionClazz = this.connection.getClass();
+        } else {
+            this.connectionClazz = this.connection.getClass();
+        }
+        this.getCopyAPIMethod = this.connectionClazz.getMethod("getCopyAPI");
+        this.copyManager = this.getCopyAPIMethod.invoke(this.connection);
+        this.copyManagerClazz = this.copyManager.getClass();
+        this.copyInMethod = this.copyManagerClazz.getMethod("copyIn", String.class, Reader.class);
+    }
+
+    long doCopy(String sql, Reader reader)
+            throws InvocationTargetException, IllegalAccessException {
+        return (long) this.copyInMethod.invoke(this.copyManager, sql, reader);
+    }
+
+    private static Object getConnectionFromInvocationHandler(InvocationHandler handler)
+            throws IllegalAccessException {
+        Class<?> handlerClass = handler.getClass();
+        LOG.info("InvocationHandler class: {}", handlerClass.getName());
+        for (Field declaredField : handlerClass.getDeclaredFields()) {
+            boolean tempAccessible = declaredField.isAccessible();
+            if (!tempAccessible) {
+                declaredField.setAccessible(true);
+            }
+            Object handlerObject = declaredField.get(handler);
+            if (handlerObject instanceof Connection) {
+                if (!tempAccessible) {
+                    declaredField.setAccessible(tempAccessible);
+                }
+                return handlerObject;
+            } else {
+                if (!tempAccessible) {
+                    declaredField.setAccessible(tempAccessible);
+                }
+            }
+        }
+        return null;
+    }
+}
+------------------------------------
+File: ./seatunnel-connectors-v2/connector-jdbc/src/main/java/org/apache/seatunnel/connectors/seatunnel/jdbc/internal/executor//JdbcBatchStatementExecutor.java
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.seatunnel.connectors.seatunnel.jdbc.internal.executor;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+
+/** Executes the given JDBC statement in batch for the accumulated records. */
+public interface JdbcBatchStatementExecutor<T> {
+
+    /** Create statements from connection. */
+    void prepareStatements(Connection connection) throws SQLException;
+
+    void addToBatch(T record) throws SQLException;
+
+    /** Submits a batch of commands to the database for execution. */
+    void executeBatch() throws SQLException;
+
+    /** Close JDBC related statements. */
+    void closeStatements() throws SQLException;
+}
+------------------------------------

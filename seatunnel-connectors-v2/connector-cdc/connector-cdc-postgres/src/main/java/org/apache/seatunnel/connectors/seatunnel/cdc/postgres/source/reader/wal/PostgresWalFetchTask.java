@@ -52,7 +52,7 @@ public class PostgresWalFetchTask implements FetchTask<SourceSplitBase> {
         taskRunning = true;
 
         // enable decycle
-        if (sourceFetchContext.getSourceConfig().isEnableDeCycle()){
+        if (sourceFetchContext.getSourceConfig().isEnableDeCycle()) {
             streamingChangeEventSource =
                     new DeCyclePostgresStreamingChangeEventSource(
                             sourceFetchContext.getDbzConnectorConfig(),
@@ -64,17 +64,18 @@ public class PostgresWalFetchTask implements FetchTask<SourceSplitBase> {
                             sourceFetchContext.getDatabaseSchema(),
                             sourceFetchContext.getTaskContext(),
                             sourceFetchContext.getReplicationConnection());
-        }else{
-            streamingChangeEventSource = new PostgresStreamingChangeEventSource(
-                    sourceFetchContext.getDbzConnectorConfig(),
-                    sourceFetchContext.getSnapshotter(),
-                    sourceFetchContext.getDataConnection(),
-                    sourceFetchContext.getDispatcher(),
-                    sourceFetchContext.getErrorHandler(),
-                    Clock.SYSTEM,
-                    sourceFetchContext.getDatabaseSchema(),
-                    sourceFetchContext.getTaskContext(),
-                    sourceFetchContext.getReplicationConnection());
+        } else {
+            streamingChangeEventSource =
+                    new PostgresStreamingChangeEventSource(
+                            sourceFetchContext.getDbzConnectorConfig(),
+                            sourceFetchContext.getSnapshotter(),
+                            sourceFetchContext.getDataConnection(),
+                            sourceFetchContext.getDispatcher(),
+                            sourceFetchContext.getErrorHandler(),
+                            Clock.SYSTEM,
+                            sourceFetchContext.getDatabaseSchema(),
+                            sourceFetchContext.getTaskContext(),
+                            sourceFetchContext.getReplicationConnection());
         }
 
         offsetContext = sourceFetchContext.getOffsetContext();
